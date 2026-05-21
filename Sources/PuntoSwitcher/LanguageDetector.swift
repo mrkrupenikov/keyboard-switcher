@@ -433,7 +433,22 @@ final class LanguageDetector {
         if englishWords.contains(lower) || englishStemMatch(lower) { return true }
         let collapsed = collapseRepeats(lower)
         if collapsed != lower && (englishWords.contains(collapsed) || englishStemMatch(collapsed)) { return true }
+        if englishRePrefix(lower) { return true }
         return false
+    }
+
+    /// "rewrite" → strip "re"/"re-" → "write" in dict → English.
+    /// Covers the open-ended set of re- prefixed words without listing them all.
+    private func englishRePrefix(_ word: String) -> Bool {
+        var root: String
+        if word.hasPrefix("re-") && word.count > 3 {
+            root = String(word.dropFirst(3))
+        } else if word.hasPrefix("re") && word.count > 4 {
+            root = String(word.dropFirst(2))
+        } else {
+            return false
+        }
+        return englishWords.contains(root) || englishStemMatch(root)
     }
 
     private func hasExcessiveConsonantClusters(_ word: String, language: Language) -> Bool {
