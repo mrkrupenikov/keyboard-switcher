@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(swift build:*)",
+      "Bash(chmod +x \"/Users/illyakrupenikov/Claude/KeyBoard Switcher/build.sh\")",
+      "Bash(pkill -f PuntoSwitcher)",
+      "Bash(open \"/Users/illyakrupenikov/Claude/KeyBoard Switcher/PuntoSwitcher.app\")",
+      "Bash(open \"/Users/illyakrupenikov/Claude/KeyBoard Switcher/Keyboard Switcher.app\")",
+      "Bash(open \"/Applications/Keyboard Switcher.app\")",
+      "Bash(pkill -f KeyboardSwitcher)",
+      "Bash(__NEW_LINE_8ecf70d50a50940d__ cd:*)",
+      "Bash(APP=\"/Applications/Keyboard Switcher.app\")",
+      "Bash(__NEW_LINE_8ecf70d50a50940d__ cp:*)",
+      "Bash(cp Resources/english_words.txt \"$APP/Contents/Resources/\")",
+      "Bash(cp Resources/ukrainian_words.txt \"$APP/Contents/Resources/\")",
+      "Bash(__NEW_LINE_8ecf70d50a50940d__ xattr:*)",
+      "Bash(codesign --force --deep --sign - \"$APP\")",
+      "Bash(__NEW_LINE_8ecf70d50a50940d__ open:*)",
+      "Bash(grep -c ^..$ '/Users/illyakrupenikov/Claude/KeyBoard Switcher/Resources/english_words.txt')",
+      "Bash(grep ^..$ '/Users/illyakrupenikov/Claude/KeyBoard Switcher/Resources/english_words.txt')",
+      "Bash(bash build.sh)",
+      "Bash(\"/Users/illyakrupenikov/Claude/KeyBoard Switcher/Resources/ukrainian_words.txt\")",
+      "Bash(\"/Users/illyakrupenikov/Claude/KeyBoard Switcher/Resources/ukrainian_words.txt\":*)",
+      "Bash(perl -ne 'chomp; next if /^\\\\s*$/; $lc = lc\\($_\\); print \"\"$_\\\\n\"\" unless $seen{$lc}++' \"/Users/illyakrupenikov/Claude/KeyBoard Switcher/Resources/ukrainian_words.txt\")",
+      "Bash(mv /tmp/uk_deduped.txt \"/Users/illyakrupenikov/Claude/KeyBoard Switcher/Resources/ukrainian_words.txt\")",
+      "Bash(\"/Users/illyakrupenikov/Claude/KeyBoard Switcher/Resources/english_words.txt\":*)",
+      "Bash(perl -ne 'chomp; next if /^\\\\s*$/; $lc = lc\\($_\\); print \"\"$_\\\\n\"\" unless $seen{$lc}++' \"/Users/illyakrupenikov/Claude/KeyBoard Switcher/Resources/english_words.txt\")",
+      "Bash(mv /tmp/en_deduped.txt \"/Users/illyakrupenikov/Claude/KeyBoard Switcher/Resources/english_words.txt\")",
+      "Bash(pkill -f \"Keyboard Switcher\")",
+      "Bash(/usr/bin/log show:*)",
+      "Bash(grep *)"
+    ]
+  }
+}
