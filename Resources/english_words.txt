@@ -2185,6 +2185,10 @@ zambia
 zimbabwe
 krupenikov
 krupenikova
+krupenikove
+krupenikovi
+krupenikovim
+krupenikovykh
 don't
 isn't
 wasn't
@@ -2274,3 +2278,11 @@ extractor
 extractors
 extractable
 extractive
+ukrainian
+ukrainians
+ukraine's
+krupa
+krupa's
+krupi
+krupu
+krupo
