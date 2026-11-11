@@ -186,8 +186,8 @@ final class KeyMonitor {
                 lastCorrection!.charsTypedAfter += 1
             }
 
-            // Inline detection: check after 2+ characters
-            if wordBuffer.count >= 2 {
+            // Inline detection: wait for at least 3 typed letters
+            if wordBuffer.count >= LanguageDetector.minInlineLength {
                 let isEnglish = inputSourceManager.isCurrentInputSourceEnglish
                 if detector.shouldSwitchInline(buffer: wordBuffer, currentLayoutIsEnglish: isEnglish) {
                     let corrected = detector.convertWord(wordBuffer, currentLayoutIsEnglish: isEnglish)

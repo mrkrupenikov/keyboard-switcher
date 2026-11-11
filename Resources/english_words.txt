@@ -2321,3 +2321,13 @@ restart
 reconsider
 remap
 revise
+is
+an
+am
+hi
+oh
+ok
+or
+ps
+nb
+jr

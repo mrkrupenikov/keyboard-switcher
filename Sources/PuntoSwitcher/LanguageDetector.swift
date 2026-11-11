@@ -16,6 +16,8 @@ final class LanguageDetector {
 
     private var englishWords: Set<String> = []
     private var ukrainianWords: Set<String> = []
+    private var englishPrefixes: Set<String> = []
+    private var ukrainianPrefixes: Set<String> = []
 
     // Common Ukrainian bigrams (high frequency) — expanded for inline detection
     private let ukrainianBigrams: Set<String> = [
@@ -156,7 +158,24 @@ final class LanguageDetector {
             }
         }
 
+        englishPrefixes = Self.prefixes(of: englishWords)
+        ukrainianPrefixes = Self.prefixes(of: ukrainianWords)
+
         print("[PuntoSwitcher] Loaded \(englishWords.count) English words, \(ukrainianWords.count) Ukrainian words")
+    }
+
+    /// Every leading fragment (minInlineLength+ chars) of every dictionary word.
+    /// Lets inline detection tell "start of a word I know" from gibberish.
+    private static func prefixes(of words: Set<String>) -> Set<String> {
+        var result: Set<String> = []
+        for word in words where word.count >= minInlineLength {
+            var prefix = String(word.prefix(minInlineLength - 1))
+            for ch in word.dropFirst(minInlineLength - 1) {
+                prefix.append(ch)
+                result.insert(prefix)
+            }
+        }
+        return result
     }
 
     /// Detect if a word typed in the current layout is actually meant for the other layout.
@@ -167,6 +186,24 @@ final class LanguageDetector {
     func shouldSwitch(typedWord: String, currentLayoutIsEnglish: Bool) -> Bool {
         let word = typedWord.trimmingCharacters(in: .whitespaces)
         guard word.count >= 2 else { return false }
+
+        // Finished words shorter than the inline minimum: letter statistics are too
+        // noisy at this length, so only switch on an exact dictionary hit.
+        if word.count < Self.minInlineLength {
+            let lower = word.lowercased()
+            if currentLayoutIsEnglish {
+                guard KeyboardLayoutMap.isLatin(lower) else { return false }
+                let converted = KeyboardLayoutMap.convertToUkrainian(lower)
+                return KeyboardLayoutMap.isCyrillic(converted)
+                    && ukrainianWords.contains(converted)
+                    && !englishWordMatch(lower)
+            } else {
+                let converted = KeyboardLayoutMap.convertToEnglish(lower)
+                return KeyboardLayoutMap.isLatin(converted)
+                    && englishWords.contains(converted)
+                    && !ukrainianWordMatch(lower)
+            }
+        }
 
         if currentLayoutIsEnglish {
             // User typed Latin chars but maybe meant Ukrainian
@@ -209,19 +246,22 @@ final class LanguageDetector {
         }
     }
 
-    // MARK: - Inline Detection (2-3 characters)
+    // MARK: - Inline Detection (3+ characters)
 
-    /// Check if the buffer typed so far (2+ chars) clearly belongs to the wrong layout.
+    /// Minimum letters typed before a mid-word switch is considered.
+    static let minInlineLength = 3
+
+    /// Check if the buffer typed so far (3+ chars) clearly belongs to the wrong layout.
     /// Uses strict bigram ratio analysis — only switches on high-confidence mismatches.
     func shouldSwitchInline(buffer: String, currentLayoutIsEnglish: Bool) -> Bool {
-        guard buffer.count >= 2 else { return false }
+        guard buffer.count >= Self.minInlineLength else { return false }
         let word = buffer.lowercased()
 
         if currentLayoutIsEnglish {
             guard KeyboardLayoutMap.isLatin(word) else { return false }
 
-            // If it's a known English word, never switch
-            if englishWordMatch(word) { return false }
+            // If it's a known English word, or the start of one, never switch
+            if englishWordMatch(word) || englishPrefixes.contains(normalizeApostrophes(word)) { return false }
 
             let converted = KeyboardLayoutMap.convertToUkrainian(word)
             guard KeyboardLayoutMap.isCyrillic(converted) else { return false }
@@ -234,19 +274,15 @@ final class LanguageDetector {
             let enRatio = rawBigramRatio(word: word, bigrams: englishBigrams)
             let ukRatio = rawBigramRatio(word: converted, bigrams: ukrainianBigrams)
 
-            if word.count == 2 {
-                // Very strict: typed bigram not English at all, converted is valid Ukrainian
-                return enRatio == 0.0 && ukRatio > 0.0
-            }
-
-            // 3+ chars: current looks bad, converted looks good
+            // Current looks bad, converted looks good
             return enRatio < 0.6 && ukRatio > 0.7 && (ukRatio - enRatio) > 0.3
         } else {
             // Ukrainian layout — user might be typing English
             let converted = KeyboardLayoutMap.convertToEnglish(word)
             guard KeyboardLayoutMap.isLatin(converted) else { return false }
 
-            if ukrainianWordMatch(word) { return false }
+            // Known Ukrainian word, or the start of one: never switch
+            if ukrainianWordMatch(word) || ukrainianPrefixes.contains(normalizeApostrophes(word)) { return false }
 
             if englishWordMatch(converted) && !ukrainianWordMatch(word) {
                 return true
@@ -254,10 +290,6 @@ final class LanguageDetector {
 
             let ukRatio = rawBigramRatio(word: word, bigrams: ukrainianBigrams)
             let enRatio = rawBigramRatio(word: converted, bigrams: englishBigrams)
-
-            if word.count == 2 {
-                return ukRatio == 0.0 && enRatio > 0.0
-            }
 
             return ukRatio < 0.6 && enRatio > 0.7 && (enRatio - ukRatio) > 0.3
         }
