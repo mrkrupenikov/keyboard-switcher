@@ -10,11 +10,25 @@ final class KeyMonitor {
     private let inputSourceManager: InputSourceManager
 
     private var wordBuffer: String = ""
+    /// This word was already switched mid-word; leave it alone until it ends.
+    private var inlineLocked = false
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+
+    // A rewrite (delete + retype) is in flight. Keys the user presses meanwhile are
+    // held and replayed once it has landed, so they can't end up inside the rewrite.
     private var isProcessing = false
     private var processingStartTime: CFAbsoluteTime = 0
+    private var rewriteGeneration = 0
     private static let maxProcessingTime: CFAbsoluteTime = 1.5
+
+    private struct HeldKey {
+        let keyCode: CGKeyCode
+        let keyDown: Bool
+        let flags: CGEventFlags
+    }
+    private var heldKeys: [HeldKey] = []
+    private var heldDownKeyCodes: Set<CGKeyCode> = []
 
     // Undo support: remember the last correction so Ctrl+Z can revert it
     private struct LastCorrection {
@@ -80,7 +94,10 @@ final class KeyMonitor {
         }
         eventTap = nil
         runLoopSource = nil
-        wordBuffer = ""
+        resetWord()
+        isProcessing = false
+        heldKeys.removeAll()
+        heldDownKeyCodes.removeAll()
         NSLog("[KeyboardSwitcher] Key monitor stopped")
     }
 
@@ -97,24 +114,50 @@ final class KeyMonitor {
             return Unmanaged.passUnretained(event)
         }
 
-        // Only process keyDown events for detection
-        guard type == .keyDown, isEnabled else {
+        guard type == .keyDown || type == .keyUp else {
             return Unmanaged.passUnretained(event)
         }
 
-        // Safety timeout: if isProcessing has been stuck for too long, force-reset
-        if isProcessing {
-            if CFAbsoluteTimeGetCurrent() - processingStartTime > Self.maxProcessingTime {
-                NSLog("[KeyboardSwitcher] Safety timeout: resetting isProcessing")
-                isProcessing = false
-                wordBuffer = ""
-            } else {
-                return Unmanaged.passUnretained(event)
-            }
+        // Our own synthetic events pass straight through. The last one of a rewrite
+        // tells us it has fully landed, so held keys can follow it.
+        let marker = event.getIntegerValueField(.eventSourceUserData)
+        if marker == TextRewriter.syntheticMarker {
+            return Unmanaged.passUnretained(event)
+        }
+        if marker == TextRewriter.syntheticEndMarker {
+            finishRewrite()
+            return Unmanaged.passUnretained(event)
         }
 
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         let flags = event.flags
+
+        // Rewrite in flight: hold the user's keys instead of letting them land mid-rewrite
+        if isProcessing {
+            let timedOut = CFAbsoluteTimeGetCurrent() - processingStartTime > Self.maxProcessingTime
+            if timedOut {
+                NSLog("[KeyboardSwitcher] Safety timeout: releasing held keys")
+            }
+            let code = CGKeyCode(keyCode)
+            if type == .keyDown || heldDownKeyCodes.contains(code) {
+                heldKeys.append(HeldKey(keyCode: code, keyDown: type == .keyDown, flags: flags))
+                if type == .keyDown {
+                    heldDownKeyCodes.insert(code)
+                } else {
+                    heldDownKeyCodes.remove(code)
+                }
+                if timedOut { finishRewrite() }
+                return nil
+            }
+            // Key-up of a key that went down before the rewrite began
+            if timedOut { finishRewrite() }
+            return Unmanaged.passUnretained(event)
+        }
+
+        // Only process keyDown events for detection
+        guard type == .keyDown, isEnabled else {
+            return Unmanaged.passUnretained(event)
+        }
 
         // --- Ctrl+Z: Undo last correction ---
         if keyCode == 0x06 /* z */ && flags.contains(.maskControl) && !flags.contains(.maskCommand) {
@@ -143,10 +186,16 @@ final class KeyMonitor {
 
         // Check if this is a word boundary
         if isWordBoundary(keyCode: keyCode, char: char) {
-            if !wordBuffer.isEmpty {
-                processWord(triggerChar: char)
-            }
+            let correcting = !wordBuffer.isEmpty && processWord()
             lastCorrection = nil // word ended, undo no longer makes sense
+            if correcting {
+                // Hold the boundary key so it is retyped after the corrected word,
+                // in the new layout (keeps punctuation instead of forcing a space)
+                let code = CGKeyCode(keyCode)
+                heldKeys.append(HeldKey(keyCode: code, keyDown: true, flags: flags))
+                heldDownKeyCodes.insert(code)
+                return nil
+            }
             return Unmanaged.passUnretained(event)
         }
 
@@ -154,6 +203,9 @@ final class KeyMonitor {
         if keyCode == 0x33 {
             if !wordBuffer.isEmpty {
                 wordBuffer.removeLast()
+            }
+            if wordBuffer.isEmpty {
+                inlineLocked = false
             }
             // Track backspace for undo accounting
             if lastCorrection != nil {
@@ -172,7 +224,7 @@ final class KeyMonitor {
            keyCode == 0x7B || keyCode == 0x7C || // Left, Right arrows
            keyCode == 0x7D || keyCode == 0x7E || // Down, Up arrows
            keyCode == 0x24 { // Return/Enter
-            wordBuffer = ""
+            resetWord()
             lastCorrection = nil
             return Unmanaged.passUnretained(event)
         }
@@ -187,7 +239,7 @@ final class KeyMonitor {
             }
 
             // Inline detection: wait for at least 3 typed letters
-            if wordBuffer.count >= LanguageDetector.minInlineLength {
+            if wordBuffer.count >= LanguageDetector.minInlineLength && !inlineLocked {
                 let isEnglish = inputSourceManager.isCurrentInputSourceEnglish
                 if detector.shouldSwitchInline(buffer: wordBuffer, currentLayoutIsEnglish: isEnglish) {
                     let corrected = detector.convertWord(wordBuffer, currentLayoutIsEnglish: isEnglish)
@@ -206,24 +258,15 @@ final class KeyMonitor {
                         timestamp: CFAbsoluteTimeGetCurrent()
                     )
 
-                    isProcessing = true
-                    processingStartTime = CFAbsoluteTimeGetCurrent()
-
-                    // Switch layout IMMEDIATELY so keystrokes during rewrite use correct layout
                     inputSourceManager.switchTo(english: switchToEnglish)
                     playSwitchSound()
 
-                    wordBuffer = ""
+                    // Keep tracking the word in its corrected form, so the rest of it is
+                    // judged as one word rather than as a fresh fragment
+                    wordBuffer = corrected
+                    inlineLocked = true
 
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-                        self?.rewriter.rewriteInlineNoSwitch(
-                            originalLength: charsOnScreen,
-                            correctedText: corrected
-                        )
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                            self?.isProcessing = false
-                        }
-                    }
+                    beginRewrite(deleteCount: charsOnScreen, text: corrected)
 
                     return nil // suppress the triggering keystroke
                 }
@@ -242,28 +285,67 @@ final class KeyMonitor {
               undo.correctedText, undo.charsTypedAfter, undo.originalText,
               undo.switchedToEnglish ? "UK" : "EN")
 
-        isProcessing = true
-        processingStartTime = CFAbsoluteTimeGetCurrent()
         lastCorrection = nil
-        wordBuffer = ""
+        resetWord()
 
         // Switch back to original layout
         let restoreToEnglish = !undo.switchedToEnglish
         inputSourceManager.switchTo(english: restoreToEnglish)
 
+        // Delete corrected text + any extra chars typed after
+        beginRewrite(deleteCount: totalToDelete, text: undo.originalText)
+    }
+
+    // MARK: - Rewriting
+
+    /// Delete `deleteCount` characters and type `text`. From now until the rewrite has
+    /// landed, the user's keystrokes are held; `finishRewrite` replays them.
+    /// The caller switches the layout first.
+    private func beginRewrite(deleteCount: Int, text: String) {
+        isProcessing = true
+        processingStartTime = CFAbsoluteTimeGetCurrent()
+        rewriteGeneration += 1
+        let generation = rewriteGeneration
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            // Delete corrected text + any extra chars typed after
-            self?.rewriter.rewriteInlineNoSwitch(
-                originalLength: totalToDelete,
-                correctedText: undo.originalText
-            )
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                self?.isProcessing = false
+            guard let self = self, self.rewriteGeneration == generation else { return }
+            self.rewriter.replace(deleteCount: deleteCount, with: text)
+
+            // Normally the tap sees the rewrite's last event and finishes right away;
+            // this only matters if that event never comes back to us.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                guard let self = self, self.rewriteGeneration == generation else { return }
+                self.finishRewrite()
             }
         }
     }
 
+    /// The rewrite has landed: retype whatever the user pressed in the meantime.
+    /// The keys are posted as ordinary events, so they come back through the tap and
+    /// are tracked like normal typing, in the layout that is now active.
+    private func finishRewrite() {
+        guard isProcessing else { return }
+        isProcessing = false
+
+        let keys = heldKeys
+        heldKeys.removeAll()
+        heldDownKeyCodes.removeAll()
+        guard !keys.isEmpty else { return }
+
+        let source = CGEventSource(stateID: .hidSystemState)
+        for key in keys {
+            guard let replay = CGEvent(keyboardEventSource: source, virtualKey: key.keyCode, keyDown: key.keyDown) else { continue }
+            replay.flags = key.flags
+            replay.post(tap: .cghidEventTap)
+        }
+    }
+
     // MARK: - Helpers
+
+    private func resetWord() {
+        wordBuffer = ""
+        inlineLocked = false
+    }
 
     private func isWordBoundary(keyCode: Int64, char: Character) -> Bool {
         if keyCode == 0x31 { return true }
@@ -275,43 +357,36 @@ final class KeyMonitor {
         return false
     }
 
-    private func processWord(triggerChar: Character) {
+    /// Check the finished word and start a correction if it was typed in the wrong layout.
+    /// Returns true if a correction started; the caller then holds the boundary key.
+    private func processWord() -> Bool {
         let word = wordBuffer
-        wordBuffer = ""
+        resetWord()
 
-        guard word.count >= 2 else { return }
+        guard word.count >= 2 else { return false }
 
         let isEnglish = inputSourceManager.isCurrentInputSourceEnglish
 
-        if detector.shouldSwitch(typedWord: word, currentLayoutIsEnglish: isEnglish) {
-            let corrected = detector.convertWord(word, currentLayoutIsEnglish: isEnglish)
-            let switchToEnglish = !isEnglish
+        guard detector.shouldSwitch(typedWord: word, currentLayoutIsEnglish: isEnglish) else { return false }
 
-            NSLog("[KeyboardSwitcher] Word: '%@' → '%@' (switch to %@)",
-                  word, corrected, switchToEnglish ? "EN" : "UK")
+        let corrected = detector.convertWord(word, currentLayoutIsEnglish: isEnglish)
+        let switchToEnglish = !isEnglish
 
-            // Save for undo
-            lastCorrection = LastCorrection(
-                originalText: word,
-                correctedText: corrected,
-                switchedToEnglish: switchToEnglish,
-                timestamp: CFAbsoluteTimeGetCurrent()
-            )
+        NSLog("[KeyboardSwitcher] Word: '%@' → '%@' (switch to %@)",
+              word, corrected, switchToEnglish ? "EN" : "UK")
 
-            isProcessing = true
-            processingStartTime = CFAbsoluteTimeGetCurrent()
-            playSwitchSound()
+        // Save for undo
+        lastCorrection = LastCorrection(
+            originalText: word,
+            correctedText: corrected,
+            switchedToEnglish: switchToEnglish,
+            timestamp: CFAbsoluteTimeGetCurrent()
+        )
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-                self?.rewriter.rewrite(
-                    originalLength: word.count,
-                    correctedText: corrected,
-                    switchToEnglish: switchToEnglish
-                )
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                    self?.isProcessing = false
-                }
-            }
-        }
+        inputSourceManager.switchTo(english: switchToEnglish)
+        playSwitchSound()
+
+        beginRewrite(deleteCount: word.count, text: corrected)
+        return true
     }
 }

@@ -14,7 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Initialize components
         detector = LanguageDetector()
         inputSourceManager = InputSourceManager()
-        rewriter = TextRewriter(inputSourceManager: inputSourceManager)
+        rewriter = TextRewriter()
         keyMonitor = KeyMonitor(
             detector: detector,
             rewriter: rewriter,

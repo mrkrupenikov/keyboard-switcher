@@ -5,67 +5,43 @@ import Carbon
 /// Handles deleting typed text and retyping it with the correct characters
 final class TextRewriter {
 
-    /// Marker value to identify our synthetic events (so the event tap lets them through)
+    /// Marks our synthetic events so the event tap lets them through untouched
     static let syntheticMarker: Int64 = 0x4B535752 // "KSWR"
+    /// Marks the final event of a rewrite: once the tap sees it, the rewrite has landed
+    static let syntheticEndMarker: Int64 = 0x4B535745 // "KSWE"
 
-    private let inputSourceManager: InputSourceManager
+    /// Delete `deleteCount` characters, then type `text`.
+    /// The caller is responsible for switching the layout beforehand.
+    func replace(deleteCount: Int, with text: String) {
+        let chars = Array(text)
+        let source = CGEventSource(stateID: .hidSystemState)
 
-    init(inputSourceManager: InputSourceManager) {
-        self.inputSourceManager = inputSourceManager
-    }
-
-    /// Rewrite the last typed word with the corrected version (triggered by word boundary)
-    func rewrite(originalLength: Int, correctedText: String, switchToEnglish: Bool) {
-        deleteCharacters(count: originalLength + 1)
-        usleep(30_000)
-        inputSourceManager.switchTo(english: switchToEnglish)
-        usleep(50_000)
-        typeText(correctedText + " ")
-    }
-
-    /// Rewrite mid-word (inline detection, no trigger character to handle)
-    func rewriteInline(originalLength: Int, correctedText: String, switchToEnglish: Bool) {
-        deleteCharacters(count: originalLength)
-        usleep(30_000)
-        inputSourceManager.switchTo(english: switchToEnglish)
-        usleep(50_000)
-        typeText(correctedText)
-    }
-
-    /// Rewrite mid-word when layout was already switched by the caller
-    func rewriteInlineNoSwitch(originalLength: Int, correctedText: String) {
-        deleteCharacters(count: originalLength)
-        usleep(30_000)
-        typeText(correctedText)
+        for i in 0..<max(deleteCount, 0) {
+            postKey(source, virtualKey: 0x33, unicode: nil,
+                    isLast: chars.isEmpty && i == deleteCount - 1)
+        }
+        if deleteCount > 0 && !chars.isEmpty {
+            usleep(30_000)
+        }
+        for (i, char) in chars.enumerated() {
+            postKey(source, virtualKey: 0, unicode: Array(String(char).utf16),
+                    isLast: i == chars.count - 1)
+        }
     }
 
     // MARK: - Private
 
-    private func deleteCharacters(count: Int) {
-        let src = CGEventSource(stateID: .hidSystemState)
-        for _ in 0..<count {
-            let keyDown = CGEvent(keyboardEventSource: src, virtualKey: 0x33, keyDown: true)
-            let keyUp = CGEvent(keyboardEventSource: src, virtualKey: 0x33, keyDown: false)
-            keyDown?.setIntegerValueField(.eventSourceUserData, value: Self.syntheticMarker)
-            keyUp?.setIntegerValueField(.eventSourceUserData, value: Self.syntheticMarker)
-            keyDown?.post(tap: .cghidEventTap)
-            keyUp?.post(tap: .cghidEventTap)
-            usleep(5_000)
+    private func postKey(_ source: CGEventSource?, virtualKey: CGKeyCode, unicode: [UniChar]?, isLast: Bool) {
+        guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: false) else { return }
+        if let unicode = unicode {
+            keyDown.keyboardSetUnicodeString(stringLength: unicode.count, unicodeString: unicode)
         }
-    }
-
-    private func typeText(_ text: String) {
-        let src = CGEventSource(stateID: .hidSystemState)
-        for char in text {
-            let utf16 = Array(String(char).utf16)
-            let keyDown = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: true)
-            keyDown?.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
-            let keyUp = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: false)
-            keyDown?.setIntegerValueField(.eventSourceUserData, value: Self.syntheticMarker)
-            keyUp?.setIntegerValueField(.eventSourceUserData, value: Self.syntheticMarker)
-            keyDown?.post(tap: .cghidEventTap)
-            keyUp?.post(tap: .cghidEventTap)
-            usleep(5_000)
-        }
+        keyDown.setIntegerValueField(.eventSourceUserData, value: Self.syntheticMarker)
+        keyUp.setIntegerValueField(.eventSourceUserData,
+                                   value: isLast ? Self.syntheticEndMarker : Self.syntheticMarker)
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
+        usleep(5_000)
     }
 }
